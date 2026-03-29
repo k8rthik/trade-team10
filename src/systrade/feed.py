@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
+from datetime import datetime, time as dt_time, timedelta
 from typing import Optional, override
 from zoneinfo import ZoneInfo
 
@@ -287,15 +287,29 @@ class AlpacaLiveStockFeed(Feed):
             logger.warning("next_data called with no subscribed symbols. Waiting for subscription...")
             time.sleep(self._poll_interval)
 
-        market_tz = ZoneInfo("America/New_York")
-
         while True:
             now = datetime.now(self._market_tz)
+
+            # Skip polling when market is closed (weekends + outside 9:25-16:05 ET)
+            weekday = now.weekday()
+            current_time = now.time()
+            market_pre_open = dt_time(9, 25)
+            market_post_close = dt_time(16, 5)
+
+            if weekday >= 5 or current_time < market_pre_open or current_time > market_post_close:
+                if weekday >= 5:
+                    logger.info("Market closed (weekend). Sleeping 60s...")
+                else:
+                    logger.info("Market closed (outside hours). Sleeping 60s...")
+                time.sleep(60)
+                continue
+
             start_time = now - timedelta(minutes=5)
 
             bar_request = ad.StockBarsRequest(
                 symbol_or_symbols=list(self._subscribed_symbols),
                 timeframe=ad.TimeFrame(amount=1, unit=ad.TimeFrameUnit.Minute),
+                start=start_time,
                 feed=ad.DataFeed.IEX
             )
 
