@@ -1,1 +1,33 @@
+# Secrets
 env.list
+.env
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Data (large CSVs from Alpaca)
+data/
+
+# Strategy state / runtime artifacts
+strategy_state.json
+trading_results.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
