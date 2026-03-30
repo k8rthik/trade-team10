@@ -351,7 +351,7 @@ class AlpacaLiveStockFeed(Feed):
                 symbol_or_symbols=list(self._subscribed_symbols),
                 timeframe=ad.TimeFrame(amount=1, unit=ad.TimeFrameUnit.Minute),
                 start=start_time,
-                feed=ad.DataFeed.IEX
+                feed=ad.DataFeed.SIP,
             )
 
             bars = self._data_client.get_stock_bars(bar_request)
@@ -377,11 +377,9 @@ class AlpacaLiveStockFeed(Feed):
                             volume=bar_series['volume'],
                         )
                     except KeyError:
-                        logger.warning(f"Missing data for {symbol} at {latest_timestamp}, continuing poll cycle.")
-                        result = None
-                        break
+                        logger.debug(f"No data for {symbol} at {latest_timestamp}, skipping")
 
-                if result is not None:
+                if result.symbols():
                     self._last_timestamp = latest_timestamp
                     return result
 
