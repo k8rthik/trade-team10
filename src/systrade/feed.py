@@ -273,6 +273,25 @@ class AlpacaLiveStockFeed(Feed):
         self._subscribed_symbols.add(symbol)
         logger.info(f"Subscribed to {symbol} for polling live data.")
 
+    def _seconds_until_pre_open(self) -> float:
+        """Calculate seconds until the next market pre-open window (9:25 AM ET).
+
+        Handles weekdays before open, after close, and weekends.
+        Returns 0 if already inside the trading window.
+        """
+        now = datetime.now(self._market_tz)
+        today_open = now.replace(hour=9, minute=25, second=0, microsecond=0)
+
+        if now.weekday() < 5 and now < today_open:
+            # Before pre-open on a weekday — wake up today
+            return max((today_open - now).total_seconds(), 0)
+
+        # After market close or weekend — target next trading day
+        target = today_open + timedelta(days=1)
+        while target.weekday() >= 5:
+            target += timedelta(days=1)
+
+        return max((target - now).total_seconds(), 0)
 
     @override
     def next_data(self) -> BarData:
@@ -297,11 +316,33 @@ class AlpacaLiveStockFeed(Feed):
             market_post_close = dt_time(16, 5)
 
             if weekday >= 5 or current_time < market_pre_open or current_time > market_post_close:
-                if weekday >= 5:
-                    logger.info("Market closed (weekend). Sleeping 60s...")
-                else:
-                    logger.info("Market closed (outside hours). Sleeping 60s...")
-                time.sleep(60)
+                sleep_secs = self._seconds_until_pre_open()
+                if sleep_secs <= 0:
+                    continue
+                wake_at = now + timedelta(seconds=sleep_secs)
+                logger.info(
+                    "Market closed. Sleeping until %s ET (%.1f hours)",
+                    wake_at.strftime("%a %Y-%m-%d %H:%M"),
+                    sleep_secs / 3600,
+                )
+                # Sleep in 30-min chunks for reliability against
+                # container restarts, clock drift, and DST transitions.
+                _MAX_CHUNK = 1800
+                remaining = sleep_secs
+                while remaining > 0:
+                    chunk = min(remaining, _MAX_CHUNK)
+                    time.sleep(chunk)
+                    remaining -= chunk
+                    now_check = datetime.now(self._market_tz)
+                    if (now_check.weekday() < 5
+                            and market_pre_open <= now_check.time() <= market_post_close):
+                        break
+                    if remaining > 0:
+                        logger.debug(
+                            "Heartbeat: %.1f hours until market pre-open",
+                            remaining / 3600,
+                        )
+                logger.info("Waking up — market pre-open imminent, resuming poll")
                 continue
 
             start_time = now - timedelta(minutes=5)
