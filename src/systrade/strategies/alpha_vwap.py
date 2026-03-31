@@ -214,7 +214,17 @@ class AlphaVWAPStrategy(Strategy):
 
         # Attempt crash recovery: DB checkpoint → file checkpoint → DB bar warm-up
         if self._load_checkpoint():
-            logger.info("Resumed from checkpoint — skipping fresh init")
+            # If checkpoint has stale active_symbols from a different universe,
+            # force a reset so the gap scanner picks from the current symbols.
+            stale = [s for s in self._active_symbols if s not in self._states]
+            if stale:
+                logger.warning(
+                    "Checkpoint active_symbols %s not in current universe — forcing reset",
+                    stale,
+                )
+                self._last_reset_date = None  # will trigger _daily_reset on first bar
+            else:
+                logger.info("Resumed from checkpoint — skipping fresh init")
         else:
             self._warm_up_from_db()
 
@@ -242,10 +252,14 @@ class AlphaVWAPStrategy(Strategy):
             self._update_vwap(sym, bar)
             self._process_twap(sym, bar)
 
-        # Periodic portfolio status log (~every 10 minutes)
-        if (self._last_status_log is None
-                or (now_et - self._last_status_log).total_seconds() >= 600):
+        # Periodic diagnostics (~every 10 minutes)
+        should_log = (
+            self._last_status_log is None
+            or (now_et - self._last_status_log).total_seconds() >= 600
+        )
+        if should_log:
             self._log_portfolio_status()
+            self._log_signal_diagnostics(data, now_time)
             self._last_status_log = now_et
 
         # Only trade active symbols (gap-selected)
@@ -623,29 +637,70 @@ class AlphaVWAPStrategy(Strategy):
             return  # portfolio not ready yet
 
         positions = []
-        for sym in self._active_symbols:
-            state = self._states.get(sym)
-            if state is None:
-                continue
+        for sym in self._symbols:  # check ALL symbols, not just active
             if not self.portfolio.is_invested_in(sym):
                 continue
+            state = self._states.get(sym)
             pos = self.portfolio.position(sym)
-            entry = state.entry_price or 0
+            entry = state.entry_price if state else 0
+            last_price = state.prices[-1] if (state and state.prices) else 0
             pnl_pct = 0.0
-            if entry > 0:
+            if entry and entry > 0 and last_price > 0:
                 if state.entry_side == "long":
-                    pnl_pct = ((pos.qty * (state.prices[-1] if state.prices else entry) - pos.qty * entry)
-                               / (pos.qty * entry) * 100) if pos.qty else 0
+                    pnl_pct = (last_price - entry) / entry * 100
                 else:
-                    pnl_pct = ((entry - (state.prices[-1] if state.prices else entry))
-                               / entry * 100)
+                    pnl_pct = (entry - last_price) / entry * 100
             positions.append(f"{sym}={pos.qty:+.0f}@{entry:.2f}({pnl_pct:+.1f}%)")
 
         logger.info(
-            "STATUS | cash=$%.0f bpow=$%.0f assets=$%.0f | %s",
-            cash, buying_power, asset_val,
+            "STATUS | cash=$%.0f bpow=$%.0f assets=$%.0f | active=%s | %s",
+            cash, buying_power, asset_val, self._active_symbols,
             ", ".join(positions) if positions else "FLAT",
         )
+
+    def _log_signal_diagnostics(self, data: BarData, now_time: time) -> None:
+        """Log z-scores, regime, and why trades aren't firing — every 10 min."""
+        lines = []
+        for sym in self._active_symbols:
+            state = self._states.get(sym)
+            if state is None or state.bar_count == 0:
+                lines.append(f"  {sym}: no data yet")
+                continue
+
+            bar = data.get(sym)
+            price = bar.close if bar else (state.prices[-1] if state.prices else 0)
+            std = _std(state.deviations)
+            z = (price - state.vwap) / std if std > 1e-9 else 0.0
+            regime = state.regime.regime.name if state.regime else "?"
+            conf = state.regime.confidence if state.regime else 0
+            bars = state.bar_count
+            cooldown = state.bars_since_exit
+
+            # Determine why no trade
+            reason = ""
+            if bars < self._min_bars:
+                reason = f"warming up ({bars}/{self._min_bars} bars)"
+            elif now_time < ENTRY_OPEN:
+                reason = "before ENTRY_OPEN (10:00)"
+            elif now_time >= ENTRY_CLOSE:
+                reason = "after ENTRY_CLOSE (15:15)"
+            elif self._open_position_count >= self._max_positions:
+                reason = "max positions reached"
+            elif cooldown < self._cooldown_bars:
+                reason = f"cooldown ({cooldown}/{self._cooldown_bars})"
+            elif state.active_twap is not None:
+                reason = "TWAP in progress"
+            elif abs(z) < self._entry_z:
+                reason = f"z={z:+.2f} below threshold ({self._entry_z})"
+            else:
+                reason = f"z={z:+.2f} — SIGNAL ACTIVE"
+
+            lines.append(
+                f"  {sym}: price=${price:.2f} vwap=${state.vwap:.2f} z={z:+.2f} "
+                f"regime={regime}({conf:.0%}) bars={bars} | {reason}"
+            )
+
+        logger.info("DIAGNOSTICS\n%s", "\n".join(lines))
 
     def _flatten_all(self, reason: str) -> None:
         for sym in self._symbols:
