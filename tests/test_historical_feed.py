@@ -16,12 +16,23 @@ from systrade.history import FileHistoryProvider
 # --- Helper functions (from your example) ---
 
 def _extract_raw_bar_data(df: pd.DataFrame, date_obj: datetime, sym: str) -> pd.Series:
-    """Extracts raw bar from a DataFrame in Series form (handles datetime objects now)"""
-    # Adjust extraction for timezone-aware Date column in our new implementation
-    target_date = date_obj.date().isoformat()
-    # Need to access index levels to filter correctly on the multi-index DF we use internally
-    filtered_df = df.reset_index() 
-    return filtered_df[filtered_df["Symbol"].eq(sym) & filtered_df["Date"].dt.date.eq(date_obj.date())].iloc[0]
+    """Extracts raw bar from a DataFrame in Series form.
+
+    The HistoricalFeed converts UTC timestamps to ET, which can shift the date
+    backwards (e.g. 2025-01-02 00:00 UTC → 2025-01-01 19:00 ET).  So we match
+    on the original UTC date stored in the CSV rather than the ET date.
+    """
+    filtered_df = df.copy()
+    filtered_df["Date"] = pd.to_datetime(filtered_df["Date"], utc=True)
+    # date_obj comes from the feed (ET-aware); convert back to UTC for matching
+    if date_obj.tzinfo is not None:
+        utc_date = date_obj.astimezone(ZoneInfo("UTC")).date()
+    else:
+        utc_date = date_obj.date()
+    return filtered_df[
+        filtered_df["Symbol"].eq(sym)
+        & filtered_df["Date"].dt.date.eq(utc_date)
+    ].iloc[0]
 
 
 def _assert_bar_eq_raw(bar1: Bar, raw: pd.Series, tol=1e-6) -> None:

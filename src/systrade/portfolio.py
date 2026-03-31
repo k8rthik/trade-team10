@@ -119,7 +119,7 @@ class Portfolio(PortfolioView):
     def __init__(
         self,
         cash: float,
-        broker: Broker,
+        broker: Optional[Broker] = None,
         current_positions: Optional[dict[str, Position]] = None,
         current_prices: Optional[BarData] = None,
     ) -> None:
@@ -134,11 +134,13 @@ class Portfolio(PortfolioView):
     @override
     def cash(self) -> float:
         return self._cash
-    
+
     @override
     def buying_power(self) -> float:
-        acct = self._broker.get_account_details()
-        return float(acct['buying_power'])
+        if self._broker is not None and hasattr(self._broker, 'get_account_details'):
+            acct = self._broker.get_account_details()
+            return float(acct['buying_power'])
+        return self._cash
     
     @override
     def asset_value(self) -> float:
